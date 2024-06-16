@@ -1,104 +1,55 @@
 const express = require('express');
-const faceapi = require('face-api.js');
+const bodyParser = require('body-parser');
 const canvas = require('canvas');
-const { Canvas, Image, ImageData } = canvas;
-const path = require('path');
+const faceapi = require('face-api.js');
+const fetch = require('node-fetch');
 
-// เรียกใช้ TensorFlow.js backend
-require('@tensorflow/tfjs-node');
+// Configure canvas for face-api.js
+const { Canvas, Image, ImageData } = canvas;
+faceapi.env.monkeyPatch({ Canvas, Image, ImageData, fetch });
 
 const app = express();
-const PORT = 3000;
+const port = 3000;
 
-app.use(express.json({ limit: '50mb' }));
+app.use(bodyParser.json({ limit: '50mb' }));
 
-// Monkey patching canvas
-faceapi.env.monkeyPatch({ Canvas, Image, ImageData });
+// Load face-api.js models
+const loadModels = async () => {
+    await faceapi.nets.ssdMobilenetv1.loadFromDisk('./models');
+    await faceapi.nets.faceLandmark68Net.loadFromDisk('./models');
+    await faceapi.nets.faceRecognitionNet.loadFromDisk('./models');
+};
 
-async function loadModels() {
-    const modelPath = path.join(__dirname, 'models');
-    console.log('Loading models...');
-    await faceapi.nets.ssdMobilenetv1.loadFromDisk(modelPath);
-    await faceapi.nets.faceLandmark68Net.loadFromDisk(modelPath);
-    await faceapi.nets.faceRecognitionNet.loadFromDisk(modelPath);
-    console.log('Models loaded successfully.');
-}
-
-function formatDescriptor(descriptor) {
-    const base64String = Buffer.from(descriptor).toString('base64');
-    return base64String;
-}
-
-async function detectFacesAndDescriptors(base64Image) {
-    try {
-        console.log("Running Try")
-        const img = new Image();
-        const buffer = Buffer.from(base64Image, 'base64');
-        img.src = buffer;
-        console.log("buffer : ", buffer);
-
-        await new Promise((resolve, reject) => {
-            console.log("Running");
-            img.onload = async () => {
-                try {
-                    console.log("Running");
-                    const detection = await faceapi.detectSingleFace(img, new faceapi.TinyFaceDetectorOptions())
-                        .withFaceLandmarks()
-                        .withFaceDescriptor();
-                    
-                    if (detection && detection.descriptor) {
-                        console.log("Running in if");
-                        const formattedDescriptor = formatDescriptor(detection.descriptor);
-                        console.log('Face descriptor:', formattedDescriptor);
-                        // Send the formatted descriptor to the client or process further
-                        resolve();
-                    } else {
-                        console.log("Running in else");
-                        reject(new Error('Face not detected or descriptor not found'));
-                    }
-                } catch (error) {
-                    reject(error);
-                }
-            };
-                                
-            img.onerror = (err) => {
-                console.log("Running Error");
-                reject(new Error(`Failed to load image: ${err.message}`));
-            };
-        });
-        return true;
-    } catch (error) {
-        throw new Error(`Error processing image: ${error.message}`);
-    }
-}
-
+// Endpoint to process the base64 image
 app.post('/analyze', async (req, res) => {
-    console.log('Received an analyze request.');
-
-    // Log base64 image data received from client
-    const base64Image = req.body.image;
-    console.log('Base64 image data length:', base64Image.length);
+    const { base64Image } = req.body;
 
     try {
-        // Ensure models are loaded before proceeding
-        if (!(faceapi.nets.ssdMobilenetv1.isLoaded &&
-              faceapi.nets.faceLandmark68Net.isLoaded &&
-              faceapi.nets.faceRecognitionNet.isLoaded)) {
-            throw new Error('Face detection models not loaded');
-        }
+        const img = new Image();
+        img.src = base64Image;
 
-        // Detect faces and descriptors from base64 image
-        await detectFacesAndDescriptors(base64Image);
+        img.onload = async () => {
+            const detections = await faceapi.detectSingleFace(img).withFaceLandmarks().withFaceDescriptor();
+            if (detections) {
+                res.json({ descriptor: detections.descriptor });
+            } else {
+                res.status(400).json({ error: 'No face detected' });
+            }
+        };
 
-        // Respond with success or appropriate data
-        res.send('Image processed successfully');
+        img.onerror = (error) => {
+            res.status(500).json({ error: 'Failed to load the image' });
+        };
     } catch (error) {
-        console.error('Error processing image:', error);
-        res.status(500).send({ error: error.message });
+        res.status(500).json({ error: 'Failed to process the image' });
     }
 });
 
-// Load models and start the server
+// Start the server after models are loaded
 loadModels().then(() => {
-    app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+    app.listen(port, () => {
+        console.log(`Server is running on port ${port}`);
+    });
+}).catch(error => {
+    console.error('Failed to load models:', error);
 });
